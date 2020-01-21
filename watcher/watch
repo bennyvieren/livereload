@@ -1,0 +1,146 @@
+#!/usr/bin/php
+
+<?php
+
+declare(ticks = 1);
+
+final class LiveReloadWatcher
+{
+    public $paths = [];
+    public $files = [];
+    public $base = "";
+    public $data = "";
+
+    public $sizes = [];
+
+    const COLORS = ["yellow" => "\e[1;33m", "green" => "\e[0;32m", "light-red" => "\e[1;31m", "white" => "\e[1;37m"];
+    const EXTENSIONS = ["xml", "js", "ts", "vue", "jsx", "css", "html", "php", "phtml", "less"];
+    const SLEEP = 1;
+
+    public function __construct($arguments)
+    {
+        $cwd = getcwd();
+        $tmp = explode("/" , substr($cwd, strpos($cwd, "www/") + 4));
+        if(!isset($arguments[1]) && $tmp[2] !== "html")
+        {
+            echo "Please specify at least 1 folder inside '/var/www/' to watch for changes." . PHP_EOL;
+            echo "Alternatively, go into a magento2 projects root directory [/**/**/project_name/www/html]" . PHP_EOL;
+            exit;
+        }
+        // Set some initial arguments to not iterate over all folders. We only need app/design and app/code.
+        $this->base = count($arguments) > 1 ? "/var/www/" . $arguments[1] . "/www/html/" : getcwd() . "/";
+        $this->data = $this->base . "vendor/webvisum/livereload/data/";
+        $this->paths = [
+            "design" => $this->base . "app/design/frontend/",
+            "modules" => $this->base . "app/code/",
+        ];
+        if(!is_dir($this->data)) {
+            mkdir($this->data);
+        }
+        self::init($arguments[1] ?? $tmp[0]);
+    }
+
+    public function init($project)
+    {
+        // Collect all files in a conservative manner. This is really fast.
+        foreach ($this->paths as $name => $folders)
+        {
+            $this->files[] = $this->recursiveScandir($folders);
+        }
+        $this->print("Watching files for project '" . $this->format($project, "yellow") . "' ...");
+        $this->print("Please reload the page if you've just started this watcher.");
+
+        // NOTE - MacOSX doesn't support this function out of the box, only Linux & Windows.
+        if(function_exists("pcntl_signal")) {
+            pcntl_signal(SIGINT, function() {
+                // Break out on CTRL + C and call the destructor immediately.
+                exit;
+            });
+        }
+
+        // Experimental
+        self::collectFilesizes($this->files);
+
+        // Watch over our files.
+        self::watch($this->files);
+    }
+
+    public function recursiveScandir(?string $dir, ?array &$collection = [])
+    {
+        $tmp = array_diff(scandir($dir), [".", ".."]);
+        foreach ($tmp as $key => $value)
+        {
+            $path = realpath($dir . DIRECTORY_SEPARATOR . $value);
+            $rawExtension = substr($path, strrpos($path, ".") + 1);
+            // Ignore stupid extensions and invalid files or dot files.
+            if(!is_dir($path)) {
+                if(in_array($rawExtension, self::EXTENSIONS)) {
+                    $collection[] = $path;
+                }
+            }
+            else {
+                // If no file was found, try to scan the possible directory for more files.
+                $this->recursiveScandir($path, $collection);
+            }
+        }
+        return $collection;
+    }
+
+    public function collectFilesizes($path)
+    {
+        foreach ($path as $folder)
+        {
+            foreach ($folder as $file)
+            {
+                $this->sizes[$file] = filesize($file);
+            }
+        }
+        return $this->sizes;
+    }
+
+    private final function watch($path)
+    {
+        // Lockfile.
+        touch($this->data . "livereload");
+        foreach ($path as $folder)
+        {
+            foreach ($folder as $watch)
+            {
+                if ($this->sizes[$watch] !== filesize($watch) && !file_exists($this->data . "reload")) {
+                    file_put_contents($this->data . "/reload", hash("sha256", filemtime($watch)));
+                    $this->sizes[$watch] = filesize($watch);
+                    $this->print("Page reloaded => File '" . $this->format(substr($watch, strrpos($watch, "/") + 1), "yellow") . "' was changed.");
+                    if(strpos($watch, ".less") !== false) {
+                        shell_exec("rm -rf var/view_preprocessed pub/static/frontend");
+                    }
+                }
+            }
+        }
+        // Sleep a while, we don't want 80-90% CPU usage. This reduces it to 1.5% CPU usage each second.
+        sleep(self::SLEEP);
+
+        // And continue to watch over our files after we're done sleeping a little.
+        self::watch($path);
+    }
+
+    public function format($string, $color = "white")
+    {
+        // Colorize a line.
+        return self::COLORS[$color] . $string . "\e[0m";
+    }
+    public function print($string, $nl = false)
+    {
+        // Print a line with 1-2 line breaks and colorized.
+        echo $this->format($string) . "\n" . ($nl ? "" : "\n");
+    }
+
+    public function __destruct()
+    {
+        // Eventually remove the livereload file to make Javscript stop firing.
+        // This does not properly work on MacOSx as PHP doesn't support PCNTL functions on that OS.
+        @unlink($this->data . "livereload");
+    }
+
+}
+
+new LiveReloadWatcher($argv);
